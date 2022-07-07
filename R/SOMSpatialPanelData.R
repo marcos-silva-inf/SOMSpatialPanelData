@@ -1,0 +1,484 @@
+################################################################
+#
+#   Tracking the Connection Between Brazilian Agricultural Diversity 
+#   and Native Vegetation Change by a Machine Learning Approach
+#
+#   R scripts
+#   Written by Marcos Silva
+#   27 June 2022
+#
+################################################################
+
+
+################################################################
+#
+#   Setting working dir
+#
+################################################################
+setwd("/media/marcos/DATA/Becape_Fev_2022/projetos/FapitecIA/manuscrito/IEEE/IEEE/R")
+
+
+################################################################
+#
+#   Used R packages
+#
+################################################################
+pkgs <- c("kohonen", "eHOF", "rgdal", "maptools", "tidyverse", "cluster", "reshape2", "kml3d", "rgdal", "maptools")
+
+#Load packages and install them if necessary
+for (p in pkgs) {
+  if (inherits(try(suppressMessages(library(p, character.only = TRUE))),
+               "try-error"))
+    install.packages(p, character.only = TRUE)
+}
+
+################################################################
+#
+#   Load panel data
+#  "CODIBGE"        - spatial unit ID
+#  "Ano"            - year
+#  "DIV.EFETIVO"    - DIV.HERD diversity of herds
+#  "DIV.VL.PRODANI" - diversity of animal production value
+#  "DIV.VL.T"       - diversity of temporary crops production value
+#  "DIV.VL.P"       - diversity of permanent crops production value
+#  "DIV.PLANT.T"    - diversity of planted temporary crops
+#  "DIV.AQU.VL"     - diversity of aquaculture production value
+#  "DIV.EXTV.VL"    - diversity of vegetal extractivism production value
+#  "DIV.SILV.VL"    - diversity of silviculture production value
+#
+################################################################
+
+data <- read.csv(file="../data/panel.data.som.indices_v2.csv", header=TRUE, sep=";")
+
+# Numerical variables used for clustering
+var.clust.traj <- 3:10
+
+#Call a R function to generate a statistical summary for all variables
+source("2-statsTable.R")
+statsTable( data, colnames(data)[var.clust.traj], "../txt/EstatisticaDescritiva.csv", decimal.format = "." )
+statsTable( data, colnames(data)[var.clust.traj], "../txt/EstatisticaDescritivaDec.csv", decimal.format = "," ) 
+
+
+################################################################
+#
+#   Defining the Kohonen Self-Organizing Map (SOM) structure
+#   
+#   We elavualted six dimensions MxN
+#   All SOMs were hexagonal, non-toroidal, Gaussian neighborhood function
+#
+################################################################
+set.seed(7)
+
+som_grid <- somgrid(xdim = 25, ydim= 30, topo="hexagonal")
+#som_grid <- somgrid(xdim = 10, ydim= 15, topo="hexagonal")
+#som_grid <- somgrid(xdim = 20, ydim= 25, topo="hexagonal")
+#som_grid <- somgrid(xdim = 30, ydim= 35, topo="hexagonal")
+#som_grid <- somgrid(xdim = 50, ydim= 60, topo="hexagonal")
+#som_grid <- somgrid(xdim = 80, ydim= 100, topo="hexagonal")
+
+################################################################
+#
+#   Calling the sequential learning SOM's algorithm
+#   But we are only randomly initializing parameters
+#   that will be replaced by parameters calculated by the SOMPAK package
+#   
+#   So, due to the large size of the dataset we preferred to apply 
+#   the learning algorithm from SOMPAK written in C
+#
+#   In SOMPAK we used the linear initialization, initial learning rate 
+#   equal to 0.05 and train length equal to 10⁷ epochs.
+#
+################################################################
+som_model <- som(as.matrix(data[,var.clust.traj]), 
+                 grid=som_grid, 
+                 rlen=5, 
+                 alpha=c(0.05,0.01), 
+                 keep.data = TRUE
+)
+
+#################################################
+#
+# For each SOM's map size we calculated the parameters (weights) using SOMPAK
+# that were saved in .COD files.
+#
+# map25x30trainedv9_Ajustado.cod
+# map10x15trainedv9_Ajustado.cod
+# map20x25trainedv9_Ajustado.cod
+# map30x35trainedv9_Ajustado.cod
+# map50x60trainedv9_Ajustado.cod
+# map80x100trainedv9_Ajustado.cod
+
+#
+#################################################
+
+#Read the SOM's weights after the sequential learning process
+somTrained <- read.csv(file="../trainedmaps/map25x30trainedv9_Ajustado.cod", header=FALSE, sep=" ")
+#somTrained <- read.csv(file="../trainedmaps/map10x15trainedv9_Ajustado.cod", header=FALSE, sep=" ")
+#somTrained <- read.csv(file="../trainedmaps/map20x25trainedv9_Ajustado.cod", header=FALSE, sep=" ")
+#somTrained <- read.csv(file="../trainedmaps/map30x35trainedv9_Ajustado.cod", header=FALSE, sep=" ")
+#somTrained <- read.csv(file="../trainedmaps/map50x60trainedv9_Ajustado.cod", header=FALSE, sep=" ")
+#somTrained <- read.csv(file="../trainedmaps/map80x100trainedv9_Ajustado.cod", header=FALSE, sep=" ") 
+somTrained <- somTrained[,-c(9)]
+
+#Associate the trained SOM's weights generated by SOMPAK to the kohonen map from R package
+som_model$codes[[1]] <- as.matrix(somTrained)
+
+#Map each data entry to a neuron
+classif <- map(som_model, as.matrix(data[,var.clust.traj]), maxNA.fraction = 1)
+
+#Save the result in the kohonen map from R package
+som_model$unit.classif <- classif$unit.classif
+som_model$distances <-classif$distances
+som_model$whatmap <- classif$whatmap
+som_model$user.weights <- classif$user.weights
+
+
+################################################################
+#
+#   Visualization of the results using kohonen's R packages plot functions
+#
+################################################################
+
+#plot(som_model, type="count", main="Number of observations associated to each neuron")
+
+#plot(som_model, type = "mapping",   pch = 1, main = "All observations", keepMargins = TRUE)
+
+################################################################
+#
+#   Clustering SOM's weights using k-means with the support of
+#   Elbow method and Silhouette quality index
+#
+################################################################
+
+# K-means
+mydata <- som_model$codes[[1]] 
+wss <- (nrow(mydata)-1)*sum(apply(mydata,2,var)) 
+for (i in 2:15) {
+  wss[i] <- sum(kmeans(mydata, iter.max = 30, centers=i)$withinss)
+}
+
+# Elbow curve
+#png(filename = "../images/25_30_Elbow_SOM_v2.png", width = 8, height = 8, units = "in", res=600)
+plot(wss, 
+     main = "Elbow curve for K-means \ncodevectors clustering SOM",
+     type = "b", pch = 19, frame = FALSE, 
+     xlab = "k",
+     ylab = "Within squared sum error",
+     cex=1.5,
+     cex.lab=1.5,
+     cex.axis=1.0,
+     cex.main =1.5,
+     xlim = c(0,15))
+#dev.off()
+
+#   Silhouette quality index
+mydata <- som_model$codes[[1]] 
+avg_sil <- function(k) {
+  km.res <- kmeans(mydata, centers = k, nstart = 25)
+  ss <- silhouette(km.res$cluster, dist(mydata))
+  mean(ss[, 3])
+}
+# Compute and plot wss for k = 2 to k = 15
+k.values <- 2:15
+# extract avg silhouette for 2-15 clusters
+avg_sil_values <- map_dbl(k.values, avg_sil)
+
+#png(filename = "../images/25_30_Silhouette_SOM_v2.png", width = 8, height = 8, units = "in", res=600)
+plot(k.values, avg_sil_values,
+     main = "Evaluating k \nSilhouette method for k-means SOM",
+     type = "b", pch = 19, frame = FALSE, 
+     xlab = "k",
+     ylab = "Silhouette cluster quality index (mean)",
+     cex=1.5,
+     cex.lab=1.5,
+     cex.axis=1.0,
+     cex.main =1.5,
+     xlim = c(0,15))
+#dev.off()
+
+#The "best" k for SOM 10x15: k = 5
+#The "best" k for SOM 20x25: k = 5
+#The "best" k for SOM 25x30: k = 5
+#The "best" k for SOM 30x35: k = 5
+#The "best" k for SOM 50x60: k = 6
+#The "best" k for SOM 80x100: k = 5
+
+################################################################
+#
+#   After defining k, cluster SOM's neurons and plot it
+#
+################################################################
+
+som_cluster <- kmeans(mydata, centers = 5, nstart = 25, iter.max = 25)
+pretty_palette <- c("#1f77b4", '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2',"#F08080") 
+label.data <- rep("", dim(data)[1])
+
+#png(filename = "../images/25_30_Clustered_SOM_k5.png", width = 12, height = 12, units = "in", res=600)
+par(mar=c(15.1, 4.1, 4.1, 2.1), xpd=TRUE)
+plot(som_model, type="mapping", 
+     bgcol = pretty_palette[som_cluster$cluster], 
+     labels = label.data, 
+     main = "", 
+     cex=1.5,
+     cex.lab=1.5,
+     cex.axis=1.0, keepMargins = TRUE )
+title("Segmented neural map", line = +2.5, cex.main=2.5)
+add.cluster.boundaries(som_model, som_cluster$cluster)
+legend(2,5,  inset=.02, title="Homogeneos regions on the neural map",
+       c("1","2","3","4","5"), fill=pretty_palette, horiz=TRUE, cex=1.5)
+mtext('Segmented neural map', 
+      side=1, line=10.15,  cex = 0.8, font = 1)
+#dev.off()
+
+################################################################
+#
+#  Generate th Component Planes
+#
+################################################################
+#png(filename = "../images/25_30_CP_som_v2.png", width = 15, height = 15, units = "in", res=600)
+coolBlueHotRed <- function(n, alpha = 1) {rainbow(n, end=4/6, alpha=alpha)[n:1]}
+
+library(mixAK)
+layout(autolayout(8))
+for (i in 1:length(var.clust.traj)) {
+  plot(som_model, type = "property", 
+       property = getCodes(som_model)[,i], 
+       main="", palette.name=coolBlueHotRed, cex=1.25, cex.axis=0.8) 
+  title(colnames(data[,var.clust.traj])[i], line = +.5, cex.main=2)
+  add.cluster.boundaries(som_model, som_cluster$cluster, lwd = 4)
+}
+#dev.off()
+
+################################################################
+#
+#  Associates each data entry to a SOM's cluster
+#
+################################################################
+cluster_assignment <- som_cluster$cluster[som_model$unit.classif]
+table(cluster_assignment)
+data$clusterSOMk <- cluster_assignment  
+
+########################################################################
+#
+# Trajectory analysis of each spatial unit on the neural map
+#
+########################################################################
+
+#Coordinates of each neuron on the neural map
+coords <- as.data.frame(som_model$grid$pts)
+
+#Associating each data entry to the neuron's coordinates (x,y)
+data$x <- NA
+data$y <- NA
+for (i in 1:length(som_model$unit.classif)) {
+  data[i,"x"]  <-  coords[som_model$unit.classif[i],"x"]
+  data[i,"y"]  <-  coords[som_model$unit.classif[i],"y"]
+}
+
+########################################################################
+#
+#  Trajectory clustering
+#
+#########################################################################
+
+#Format data according kml package
+data.traj <- data[c("CODIBGE","Ano","x","y")]
+melt.data.clust <- melt(data.traj, id.vars = c("CODIBGE","Ano"))
+m.data.clust <- acast(melt.data.clust, CODIBGE ~ Ano ~ variable)
+ids <- unique(data.traj$CODIBGE)
+data.3d <- cld3d(
+  traj=m.data.clust,
+  idAll=ids,
+  time=1999:2018,
+  varNames=c("x", "y" ))
+
+#Clustering using kml3d function testing k=3..10 using default parameters
+kml3d(data.3d, nbClusters = 3:10, nbRedrawing = 20  )
+
+#Getting and saving results
+numC3 <- getClusters(data.3d, 3)
+numC4 <- getClusters(data.3d, 4)
+numC5 <- getClusters(data.3d, 5)
+numC6 <- getClusters(data.3d, 6)
+numC7 <- getClusters(data.3d, 7)
+numC8 <- getClusters(data.3d, 8)
+numC9 <- getClusters(data.3d, 9)
+numC10 <- getClusters(data.3d, 10)
+
+#Transforming into dataframe
+BR.clusters <- data.frame(ids,numC3,numC4,numC5,numC6,numC7,numC8,numC9,numC10)
+
+#Merging results with data
+data <- merge(data, BR.clusters, by.x = "CODIBGE", by.y = "ids", all.x = TRUE )
+
+# Save into a CSV file
+write.table(x=data, file="../txt/25_30_RESULTADOS_SOM_v2.csv", quote=FALSE, sep = ";", row.names = FALSE)
+
+
+
+
+################################################################
+#
+# After trajectory clustering defining c using Davies-Boulding
+# and Calinski-Harabatz indices saved in data.3d object for each
+# evaluated c in {3,..,10}
+# 
+# All Davies-Bouldin and Calinski-Harabatz were saved in the Finding_c.csv
+################################################################
+data.3d@c3[[20]]
+data.3d@c4[[20]]
+data.3d@c5[[20]]
+data.3d@c6[[20]]
+data.3d@c7[[20]]
+data.3d@c8[[20]]
+data.3d@c9[[20]]
+data.3d@c10[[20]]
+
+#png(filename = "../images/25_30_Searching_c_v2.png", width = 7, height = 5, units = "in", res=600)
+finding_c <- read.csv(file="../txt/Finding_c.csv", header=TRUE, sep=";")
+tmp_min <- min(finding_c$Davies.Bouldin)
+tmp_max <- max(finding_c$Davies.Bouldin)
+finding_c$db <- 1 - (finding_c$Davies.Bouldin - tmp_min)/(tmp_max - tmp_min) 
+tmp_min <- min(finding_c$Calinsky.Harabatz)
+tmp_max <- max(finding_c$Calinsky.Harabatz)
+finding_c$ch <- (finding_c$Calinsky.Harabatz - tmp_min)/(tmp_max - tmp_min) 
+plot(finding_c$c, finding_c$db, type="l", lty = 1, xlab = "c", ylab = "min-max transformed validy indices", cex.axis = 1.0, cex.lab = 1.0)
+lines(finding_c$c, finding_c$ch, type="l", lty = 2)
+legend(4, 0.18, legend=c("Davies-Bouldin", "Calisnki-Harabatz"),
+       lty = 1:2, cex=1.0)
+#dev.off()
+
+################################################################################
+#
+# Counting number of spatial units per trajectory clusters, considering c = 8 (numC8)
+#
+################################################################################
+results <- data
+colnames(results)
+results$UF <- substr( as.character(results$CODIBGE), 1,2)
+table(results$UF)
+results$Region <- NA
+results[which(as.integer(results$UF) %in% c(21:29)),"Region"] <- "NE"
+results[which(as.integer(results$UF) %in% c(41:43)),"Region"] <- "S"
+results[which(as.integer(results$UF) %in% c(11:17)),"Region"] <- "N"
+results[which(as.integer(results$UF) %in% c(50:53)),"Region"] <- "CW"
+results[which(as.integer(results$UF) %in% c(31:35)),"Region"] <- "SE"
+results.unique <- results[which(!duplicated(results$CODIBGE)),]
+table(results.unique$Region, results.unique$numC8)
+
+################################################################
+#
+# Considering c = 8
+#
+# Plot the mean trajectory for each trajectory cluster  
+# 
+################################################################
+
+k_b <- 8
+colors <- c("#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02", "#a6761d", "#666666")
+grupos <- c("A","B","C","D","E","F","G","H")
+
+distTrajlist <- list()
+distTraj <- data[which(data$Ano %in% c(1999,2018)),]
+for (i in 1:length(ids)) {
+  obs.tmp <- distTraj[which(distTraj$CODIBGE==ids[i]), c("Ano","x","y")]
+  dist.tmp <- (obs.tmp$x[1] - obs.tmp$x[2])*(obs.tmp$x[1] - obs.tmp$x[2]) + (obs.tmp$y[1]-obs.tmp$y[2])*(obs.tmp$y[1]-obs.tmp$y[2])
+  distTrajlist[[i]] <- c(ids[i], dist.tmp)
+}
+df.distTraj <- data.frame(matrix(unlist(distTrajlist), nrow=length(distTrajlist), byrow=TRUE),stringsAsFactors=FALSE)
+colnames(df.distTraj) <- c("ids","dist")
+df.distTrajC8 <- merge(df.distTraj, BR.clusters[c("ids","numC8")], by.x = "ids", by.y = "ids", all.x = TRUE )
+
+aggTrajc8 <- aggregate(data[, c("x","y")], list(data$Ano,data$numC8), mean)
+initTrajc8 <- aggTrajc8[which(aggTrajc8$Group.1==1999),c("x","y")]
+endTrajc8 <-  aggTrajc8[which(aggTrajc8$Group.1==2018),c("x","y")]
+
+
+png(filename = "../images/25_30_MeanTrajectoriesSOM_NumC8_v2.png", width = 12, height = 12, units = "in", res=600)
+label.data <- rep("", dim(data)[1])
+plot(som_model, type="mapping", bgcol = NULL, labels = label.data, 
+     main = "", 
+     cex.lab=1.5,
+     cex.axis=1.5,
+     cex.main =1.5)
+for (i in 1:k_b) {
+  lines( aggTrajc8[which(as.character(aggTrajc8$Group.2)==grupos[i]),c("x","y")], col=colors[i], lwd=6)
+}
+add.cluster.boundaries(som_model, som_cluster$cluster, lwd = 4)  
+points(initTrajc8, pch = 16 )
+points(endTrajc8, pch = 17 )
+legend(2.4,4.0,  inset=.02, title="Trajectory cluster",
+       grupos, fill=colors, horiz=TRUE, cex=1.2)
+legend( 17,4, 
+        legend=c("Begin of the mean trajectory","End of the mean trajectory"), 
+        col=c("black"), 
+        pch=c(16,17), merge=FALSE, horiz=FALSE, cex=1.2 )
+dev.off()
+
+
+################################################################
+#
+# Considering c = 8
+#
+# Plot the mean trajectory for each trajectory cluster  
+# 
+################################################################
+
+k_b <- 8
+colors <- c("#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02", "#a6761d", "#666666")
+grupos <- c("A","B","C","D","E","F","G","H")
+
+distTrajlist <- list()
+distTraj <- data[which(data$Ano %in% c(1999,2018)),]
+for (i in 1:length(ids)) {
+  obs.tmp <- distTraj[which(distTraj$CODIBGE==ids[i]), c("Ano","x","y")]
+  dist.tmp <- (obs.tmp$x[1] - obs.tmp$x[2])*(obs.tmp$x[1] - obs.tmp$x[2]) + (obs.tmp$y[1]-obs.tmp$y[2])*(obs.tmp$y[1]-obs.tmp$y[2])
+  distTrajlist[[i]] <- c(ids[i], dist.tmp)
+}
+df.distTraj <- data.frame(matrix(unlist(distTrajlist), nrow=length(distTrajlist), byrow=TRUE),stringsAsFactors=FALSE)
+colnames(df.distTraj) <- c("ids","dist")
+df.distTrajC8 <- merge(df.distTraj, BR.clusters[c("ids","numC8")], by.x = "ids", by.y = "ids", all.x = TRUE )
+
+aggTrajc8 <- aggregate(data[, c("x","y")], list(data$Ano,data$numC8), median)
+initTrajc8 <- aggTrajc8[which(aggTrajc8$Group.1==1999),c("x","y")]
+endTrajc8 <-  aggTrajc8[which(aggTrajc8$Group.1==2018),c("x","y")]
+
+
+png(filename = "../images/25_30_MedianTrajectoriesSOM_NumC8_v2.png", width = 12, height = 12, units = "in", res=600)
+label.data <- rep("", dim(data)[1])
+plot(som_model, type="mapping", bgcol = NULL, labels = label.data, 
+     main = "", 
+     cex.lab=1.5,
+     cex.axis=1.5,
+     cex.main =1.5)
+for (i in 1:k_b) {
+  lines( aggTrajc8[which(as.character(aggTrajc8$Group.2)==grupos[i]),c("x","y")], col=colors[i], lwd=6)
+}
+add.cluster.boundaries(som_model, som_cluster$cluster, lwd = 4)  
+points(initTrajc8, pch = 16 )
+points(endTrajc8, pch = 17 )
+legend(2.4,4.0,  inset=.02, title="Trajectory cluster",
+       grupos, fill=colors, horiz=TRUE, cex=1.2)
+legend( 1,25, 
+        legend=c("Begin of the median trajectory","End of the median trajectory"), 
+        col=c("black"), 
+        pch=c(16,17), merge=FALSE, horiz=FALSE, cex=1.2 )
+dev.off()
+
+
+################################################################
+#
+#   Mapping the trajectory clusters, c = 8, into the geographical map
+#
+################################################################
+
+#Reading spatial units shapefile
+area.estudo <- readOGR("../shapefile", "BR_Municipios_2020" )
+
+#Merging results with the spatial units
+area.estudo@data <- merge(area.estudo@data, BR.clusters, by.x = "CD_MUN", by.y = "ids", all.x = TRUE )
+table(area.estudo@data$numC8)
+
+
+#Saving geographical map with results
+writePolyShape( area.estudo, "../shapefile/25_30_TrajectoryClusters_SOM_v2" )  
